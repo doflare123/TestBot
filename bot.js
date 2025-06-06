@@ -18,6 +18,8 @@ async function query(sql, params) {
   }
 }
 
+const adminAddMovieState = new Map();
+
 async function isAdmin(telegram_id) {
   const res = await query(
     "SELECT role FROM users_filmsBot WHERE telegram_id=$1",
@@ -53,8 +55,10 @@ bot.telegram.setMyCommands(
     { command: "vote", description: "Посмотреть какие фильмы на этот вечер" },
     { command: "calculate", description: "Подвести итоги голосования" },
     { command: "addpack", description: "Добавить пачку" },
+    { command: "delpack", description: "Удалить пачку" },
     { command: "addmovie", description: "добавить фильм в пачку" },
     { command: "movie_delete", description: "Удалить фильм из пачки" },
+    { command: "notify", description: "Отправить уведомление" },
   ],
   {
     scope: { type: "chat", chat_id: 930852883 },
@@ -88,23 +92,39 @@ bot.command("addpack", async (ctx) => {
 });
 
 bot.command("calculate", async (ctx) => {
-  console.log("Калькуляция запущена пользователем:", ctx.from.username);
-  if (!(await isAdmin(ctx.from.id))) {
-    console.log("Пользователь не админ:", ctx.from.id);
+  if (!(await isAdmin(ctx.from.id)))
     return ctx.reply("❌ У вас нет доступа к этой команде.");
-  }
 
   try {
-    // Получаем последнюю пачку
-    const packRes = await query(
-      "SELECT id FROM movie_packs ORDER BY id DESC LIMIT 1",
+    const packsRes = await query(
+      `SELECT id, name FROM movie_packs ORDER BY id DESC LIMIT 10`
     );
-    if (!packRes.rowCount)
-      return ctx.reply("❌ Нет ни одной добавленной пачки.");
 
-    const packId = packRes.rows[0].id;
+    if (!packsRes.rowCount)
+      return ctx.reply("❌ Нет доступных пачек.");
 
-    // Получаем всех голосующих для этой пачки с их голосами
+    const buttons = packsRes.rows.map((pack) => [
+      Markup.button.callback(pack.name, `calculate_pack_${pack.id}`)
+    ]);
+
+    await ctx.reply(
+      "📦 Выберите пачку для расчёта итогов голосования:",
+      Markup.inlineKeyboard(buttons)
+    );
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при получении списка пачек.");
+  }
+});
+
+bot.action(/^calculate_pack_(\d+)$/, async (ctx) => {
+  ctx.answerCbQuery(); // убрать "часики"
+  const packId = ctx.match[1];
+
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.reply("❌ У вас нет доступа к этой команде.");
+
+  try {
     const votesRes = await query(
       `
       SELECT u.telegram_id, u.username, m.title, v.score
@@ -116,42 +136,34 @@ bot.command("calculate", async (ctx) => {
       [packId],
     );
 
-    if (!votesRes.rowCount) return ctx.reply("❌ Нет голосов для расчёта.");
+    if (!votesRes.rowCount)
+      return ctx.reply("❌ Нет голосов для этой пачки.");
 
-    // Формируем структуру вида:
-    // { username_or_id: { movieTitle: score, ... }, ... }
     const votes = {};
-
     votesRes.rows.forEach((row) => {
       const voter = row.username || row.telegram_id.toString();
       if (!votes[voter]) votes[voter] = {};
       votes[voter][row.title] = row.score;
     });
 
-    // Рассчёт по твоей формуле
     const totals = {};
     const contributions = {};
 
     for (const [voter, ratings] of Object.entries(votes)) {
       const numVotes = Object.keys(ratings).length;
       const divisor = Math.log2(numVotes + 1);
-
       contributions[voter] = {};
 
       for (const [movie, score] of Object.entries(ratings)) {
         const weighted = score / divisor;
-
         if (!totals[movie]) totals[movie] = 0;
         totals[movie] += weighted;
-
         contributions[voter][movie] = weighted;
       }
     }
 
-    // Сортируем итоговые баллы
     const sortedTotals = Object.entries(totals).sort((a, b) => b[1] - a[1]);
 
-    // Формируем сообщения
     let resultMessage = "🏆 Итоги голосования:\n";
     sortedTotals.forEach(([movie, score]) => {
       resultMessage += `${movie}: ${score.toFixed(2)} баллов\n`;
@@ -165,12 +177,10 @@ bot.command("calculate", async (ctx) => {
       }
     }
 
-    // Отправляем результаты всем участникам голосования
     const telegramIds = [...new Set(votesRes.rows.map((r) => r.telegram_id))];
-
     for (const id of telegramIds) {
-      await ctx.telegram.sendMessage(id, resultMessage); // общий рейтинг
-      await ctx.telegram.sendMessage(id, contributionMessage); // вклад только этого пользователя
+      await ctx.telegram.sendMessage(id, resultMessage);
+      await ctx.telegram.sendMessage(id, contributionMessage);
     }
 
     ctx.reply("✅ Результаты отправлены всем участникам.");
@@ -180,90 +190,199 @@ bot.command("calculate", async (ctx) => {
   }
 });
 
+
 bot.command("movie_delete", async (ctx) => {
-  console.log("Удаление фильма запущена пользователем:", ctx.from.username);
+  console.log("Удаление фильма запущено пользователем:", ctx.from.username);
   if (!(await isAdmin(ctx.from.id)))
     return ctx.reply("❌ У вас нет доступа к этой команде.");
 
-  const text = ctx.message.text;
-  const args = text.split(" ").slice(1);
-  if (args.length === 0)
-    return ctx.reply("⚠️ Формат: /movie_delete <название_фильма>");
+  try {
+    const res = await query("SELECT id, name FROM movie_packs ORDER BY id DESC");
 
-  const movieName = args.join(" ");
+    if (res.rowCount === 0)
+      return ctx.reply("❌ Нет ни одной пачки фильмов.");
+
+    const buttons = res.rows.map((pack) => [
+      Markup.button.callback(pack.name, `deletepack_${pack.id}`)
+    ]);
+
+    ctx.reply("🎬 Выберите пачку, из которой хотите удалить фильм:", Markup.inlineKeyboard(buttons));
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при загрузке пачек.");
+  }
+});
+
+bot.action(/deletepack_(\d+)/, async (ctx) => {
+  const packId = ctx.match[1];
 
   try {
-    const packRes = await query(
-      "SELECT id FROM movie_packs ORDER BY id DESC LIMIT 1",
+    const res = await query(
+      "SELECT id, title FROM movies WHERE pack_id = $1 ORDER BY id",
+      [packId]
     );
-    if (!packRes.rowCount)
-      return ctx.reply("❌ Нет ни одной добавленной пачки.");
 
-    const packId = packRes.rows[0].id;
+    if (res.rowCount === 0)
+      return ctx.editMessageText("❌ В этой пачке нет фильмов.");
 
-    // Найдём фильм в последней пачке (регистронезависимо)
+    const buttons = res.rows.map((movie) => [
+      Markup.button.callback(movie.title, `deletemovie_${movie.id}`)
+    ]);
+
+    ctx.editMessageText("🎞 Выберите фильм для удаления:", Markup.inlineKeyboard(buttons));
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при загрузке фильмов.");
+  }
+});
+
+bot.action(/deletemovie_(\d+)/, async (ctx) => {
+  const movieId = ctx.match[1];
+
+  try {
     const movieRes = await query(
-      `SELECT id FROM movies WHERE pack_id = $1 AND LOWER(title) = LOWER($2)`,
-      [packId, movieName],
+      "SELECT title FROM movies WHERE id = $1",
+      [movieId]
     );
 
     if (!movieRes.rowCount)
-      return ctx.reply(`❌ Фильм "${movieName}" не найден в последней пачке.`);
+      return ctx.answerCbQuery("❌ Фильм уже удалён.");
 
-    const movieId = movieRes.rows[0].id;
+    const title = movieRes.rows[0].title;
 
-    // Удаляем голоса за этот фильм
     await query("DELETE FROM votes WHERE movie_id = $1", [movieId]);
-
-    // Удаляем фильм
     await query("DELETE FROM movies WHERE id = $1", [movieId]);
 
-    ctx.reply(`✅ Фильм "${movieName}" и все его голоса удалены.`);
+    await ctx.editMessageText(`✅ Фильм "${title}" и его голоса удалены.`);
   } catch (e) {
     console.error(e);
     ctx.reply("❌ Ошибка при удалении фильма.");
   }
 });
 
+
+bot.command("notify", async (ctx) => {
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.reply("❌ У вас нет доступа к этой команде.");
+
+  try {
+    const res = await query("SELECT telegram_id FROM users_filmsBot");
+
+    if (!res.rowCount)
+      return ctx.reply("❌ Нет пользователей для уведомления.");
+
+    const message = "🎬 Добавлен новый пак фильмов, проголосуй, пж";
+
+    for (const row of res.rows) {
+      try {
+        await ctx.telegram.sendMessage(row.telegram_id, message);
+      } catch (e) {
+        console.warn(`Не удалось отправить сообщение пользователю ${row.telegram_id}`);
+      }
+    }
+
+    ctx.reply("✅ Уведомление отправлено всем пользователям.");
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при отправке уведомлений.");
+  }
+});
+
+bot.command("delpack", async (ctx) => {
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.reply("❌ У вас нет доступа к этой команде.");
+
+  try {
+    const res = await query("SELECT id, name FROM film_packs ORDER BY id");
+
+    if (res.rowCount === 0)
+      return ctx.reply("❌ Нет доступных паков для удаления.");
+
+    const buttons = res.rows.map((pack) => [
+      Markup.button.callback(pack.name, `delpack_${pack.id}`)
+    ]);
+
+    ctx.reply("🗑 Выберите пак для удаления:", Markup.inlineKeyboard(buttons));
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при получении паков.");
+  }
+});
+
+bot.action(/delpack_(\d+)/, async (ctx) => {
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.answerCbQuery("❌ У вас нет доступа.");
+
+  const packId = ctx.match[1];
+
+  try {
+    // Удаляем фильмы из этого пака
+    await query("DELETE FROM films WHERE pack_id = $1", [packId]);
+
+    // Удаляем сам пак
+    await query("DELETE FROM film_packs WHERE id = $1", [packId]);
+
+    await ctx.editMessageText("✅ Пак и его фильмы удалены.");
+  } catch (e) {
+    console.error(e);
+    ctx.reply("❌ Ошибка при удалении пака.");
+  }
+});
+
+
+
 bot.command("addmovie", async (ctx) => {
-  console.log("Добавить фильм запущена пользователем:", ctx.from.username);
   if (!(await isAdmin(ctx.from.id)))
     return ctx.reply("❌ Только админ может добавлять фильмы.");
 
-  const input = ctx.message.text;
-  const match = input.match(/\/addmovie\s+"(.+?)"\s+(.+)/);
-
-  if (!match) {
-    return ctx.reply(
-      '⚠️ Формат: /addmovie "название пачки" название_фильма\nПример: /addmovie "Вечер 08.06" Терминатор',
-    );
-  }
-
-  const packName = match[1];
-  const movieTitle = match[2];
-
   try {
-    const packRes = await query(
-      `SELECT id FROM movie_packs WHERE LOWER(name) = LOWER($1)`,
-      [packName.toLowerCase()],
+    const packsRes = await query(
+      `SELECT id, name FROM movie_packs ORDER BY id DESC LIMIT 10`
     );
 
-    if (!packRes.rowCount)
-      return ctx.reply(`❌ Пачка с названием "${packName}" не найдена.`);
+    if (!packsRes.rowCount)
+      return ctx.reply("❌ Нет доступных пачек для добавления фильма.");
 
-    const packId = packRes.rows[0].id;
-
-    await query(`INSERT INTO movies (pack_id, title) VALUES ($1, $2)`, [
-      packId,
-      movieTitle,
+    const buttons = packsRes.rows.map((pack) => [
+      Markup.button.callback(pack.name, `addmovie_pack_${pack.id}`),
     ]);
 
-    ctx.reply(`✅ Фильм "${movieTitle}" добавлен в пачку "${packName}"!`);
+    await ctx.reply(
+      "🎞 Выбери пачку, в которую хочешь добавить фильм:",
+      Markup.inlineKeyboard(buttons)
+    );
   } catch (e) {
     console.error(e);
-    ctx.reply("❌ Ошибка при добавлении фильма.");
+    ctx.reply("❌ Ошибка при получении списка пачек.");
   }
 });
+
+bot.action(/^addmovie_pack_(\d+)$/, async (ctx) => {
+  ctx.answerCbQuery(); // Убираем "часики"
+  const packId = ctx.match[1];
+  const telegramId = ctx.from.id;
+
+  // Проверка, что админ
+  if (!(await isAdmin(telegramId)))
+    return ctx.reply("❌ Только админ может добавлять фильмы.");
+
+  const packRes = await query(
+    `SELECT name FROM movie_packs WHERE id = $1`,
+    [packId]
+  );
+
+  if (!packRes.rowCount)
+    return ctx.reply("❌ Пачка не найдена.");
+
+  const packName = packRes.rows[0].name;
+
+  adminAddMovieState.set(telegramId, { packId, packName });
+
+  ctx.reply(
+    `✏️ Введите название фильма, который хотите добавить в пачку "${packName}":`
+  );
+});
+
 
 bot.command("listpacks", async (ctx) => {
   console.log("Показ паков запущена пользователем:", ctx.from.username);
@@ -304,7 +423,7 @@ bot.command("vote", async (ctx) => {
     if (!moviesRes.rowCount)
       return ctx.reply("В последней пачке пока нет фильмов.");
 
-    let msg = `🎬 Голосование за фильмы в пачке "${pack.name}":\n\nВыбери фильм, затем введи оценку (от 0 до 10):`;
+    let msg = `🎬 Голосование за фильмы в пачке "${pack.name}":\n\nВыбери фильм, затем введи оценку (от 1 до 10):`;
 
     const buttons = moviesRes.rows.map((movie) => [
       Markup.button.callback(movie.title, `vote_film_${movie.id}`),
@@ -343,11 +462,36 @@ bot.on("text", async (ctx) => {
   const userId = ctx.from.id;
   const voteData = userVoteState.get(userId);
 
+   // === Обработка добавления фильма (админ) ===
+  const adminState = adminAddMovieState.get(userId);
+  if (adminState) {
+    const movieTitle = ctx.message.text.trim();
+    if (!movieTitle)
+      return ctx.reply("⚠️ Введите непустое название фильма.");
+
+    try {
+      await query(
+        "INSERT INTO movies (pack_id, title) VALUES ($1, $2)",
+        [adminState.packId, movieTitle]
+      );
+      ctx.reply(
+        `✅ Фильм "${movieTitle}" добавлен в пачку "${adminState.packName}".`
+      );
+    } catch (e) {
+      console.error(e);
+      ctx.reply("❌ Ошибка при добавлении фильма.");
+    } finally {
+      adminAddMovieState.delete(userId);
+    }
+    return;
+  }
+
+  // === Обработка голосования (пользователь) ===
   if (!voteData) return; // Пользователь не выбирал фильм через кнопку
 
   const score = Number(ctx.message.text);
-  if (isNaN(score) || score < 0 || score > 10) {
-    return ctx.reply("⚠️ Введите корректную оценку от 0 до 10.");
+  if (isNaN(score) || score < 1 || score > 10) {
+    return ctx.reply("⚠️ Введите корректную оценку от 1 до 10.");
   }
 
   try {
@@ -493,6 +637,34 @@ bot.command("vote_set", async (ctx) => {
     ctx.reply("❌ Ошибка при сохранении голоса.");
   }
 });
+
+// bot.on("text", async (ctx) => {
+//   const telegramId = ctx.from.id;
+//   const state = adminAddMovieState.get(telegramId);
+
+//   if (!state) return; // Ничего не делаем, если не ждём фильма от админа
+
+//   const movieTitle = ctx.message.text.trim();
+//   if (!movieTitle)
+//     return ctx.reply("⚠️ Введите непустое название фильма.");
+
+//   try {
+//     await query(
+//       `INSERT INTO movies (pack_id, title) VALUES ($1, $2)`,
+//       [state.packId, movieTitle]
+//     );
+
+//     ctx.reply(
+//       `✅ Фильм "${movieTitle}" добавлен в пачку "${state.packName}".`
+//     );
+//   } catch (e) {
+//     console.error(e);
+//     ctx.reply("❌ Ошибка при добавлении фильма.");
+//   } finally {
+//     adminAddMovieState.delete(telegramId); // очищаем состояние
+//   }
+// });
+
 
 bot.launch();
 console.log("Bot started");
