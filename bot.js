@@ -59,6 +59,7 @@ bot.telegram.setMyCommands(
     { command: "addmovie", description: "добавить фильм в пачку" },
     { command: "movie_delete", description: "Удалить фильм из пачки" },
     { command: "notify", description: "Отправить уведомление" },
+    { command: "listpacks", description: "Отправить уведомление" },
   ],
   {
     scope: { type: "chat", chat_id: 930852883 },
@@ -317,7 +318,7 @@ bot.action(/delpack_(\d+)/, async (ctx) => {
 
   try {
     // Удаляем фильмы из этого пака
-    await query("DELETE FROM films WHERE pack_id = $1", [packId]);
+    await query("DELETE FROM movies WHERE pack_id = $1", [packId]);
 
     // Удаляем сам пак
     await query("DELETE FROM movie_packs WHERE id = $1", [packId]);
