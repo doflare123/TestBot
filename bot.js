@@ -293,7 +293,7 @@ bot.command("delpack", async (ctx) => {
     return ctx.reply("❌ У вас нет доступа к этой команде.");
 
   try {
-    const res = await query("SELECT id, name FROM film_packs ORDER BY id");
+    const res = await query("SELECT id, name FROM movie_packs ORDER BY id");
 
     if (res.rowCount === 0)
       return ctx.reply("❌ Нет доступных паков для удаления.");
@@ -320,7 +320,7 @@ bot.action(/delpack_(\d+)/, async (ctx) => {
     await query("DELETE FROM films WHERE pack_id = $1", [packId]);
 
     // Удаляем сам пак
-    await query("DELETE FROM film_packs WHERE id = $1", [packId]);
+    await query("DELETE FROM movie_packs WHERE id = $1", [packId]);
 
     await ctx.editMessageText("✅ Пак и его фильмы удалены.");
   } catch (e) {
