@@ -510,8 +510,8 @@ bot.on("text", async (ctx) => {
   if (!voteData) return; // Пользователь не выбирал фильм через кнопку
 
   const score = Number(ctx.message.text);
-  if (isNaN(score) || score < 1 || score > 10) {
-    return ctx.reply("⚠️ Введите корректную оценку от 1 до 10.");
+  if (isNaN(score) || score < 0 || score > 10) {
+    return ctx.reply("⚠️ Введите корректную оценку от 0 до 10.");
   }
 
   try {
@@ -520,48 +520,52 @@ bot.on("text", async (ctx) => {
       [userId],
     );
     if (!userRes.rowCount)
-      return ctx.reply(
-        "❌ Ты не зарегистрирован, отправь /start для регистрации.",
-      );
+      return ctx.reply("❌ Ты не зарегистрирован, отправь /start для регистрации.");
+
     const userDbId = userRes.rows[0].id;
 
-    // Проверка на повтор оценки
-    const duplicateRes = await query(
-      "SELECT id FROM votes WHERE user_id = $1 AND pack_id = $2 AND score = $3",
-      [userDbId, voteData.packId, score],
-    );
-    if (duplicateRes.rowCount) {
-      return ctx.reply(`❌ Ты уже использовал оценку ${score} в этой пачке.`);
-    }
-
-    // Проверка на существующий голос
     const voteRes = await query(
       "SELECT id FROM votes WHERE user_id = $1 AND movie_id = $2 AND pack_id = $3",
       [userDbId, voteData.movieId, voteData.packId],
     );
 
-    if (voteRes.rowCount) {
-      await query("UPDATE votes SET score = $1 WHERE id = $2", [
-        score,
-        voteRes.rows[0].id,
-      ]);
-      ctx.reply(
-        `🔄 Обновлена оценка фильма "${voteData.movieTitle}" на ${score}.`,
-      );
+    if (score === 0) {
+      // Если уже есть оценка — удаляем
+      if (voteRes.rowCount) {
+        await query("DELETE FROM votes WHERE id = $1", [voteRes.rows[0].id]);
+        ctx.reply(`🗑️ Оценка для фильма "${voteData.movieTitle}" удалена.`);
+      } else {
+        ctx.reply("ℹ️ Ты ещё не ставил оценку этому фильму.");
+      }
     } else {
-      await query(
-        "INSERT INTO votes (user_id, movie_id, pack_id, score) VALUES ($1, $2, $3, $4)",
-        [userDbId, voteData.movieId, voteData.packId, score],
+      // Проверка на повторную оценку
+      const duplicateRes = await query(
+        "SELECT id FROM votes WHERE user_id = $1 AND pack_id = $2 AND score = $3 AND movie_id != $4",
+        [userDbId, voteData.packId, score, voteData.movieId],
       );
-      ctx.reply(
-        `✅ Оценка ${score} для фильма "${voteData.movieTitle}" сохранена.`,
-      );
+      if (duplicateRes.rowCount) {
+        return ctx.reply(`❌ Ты уже использовал оценку ${score} в этой пачке.`);
+      }
+
+      if (voteRes.rowCount) {
+        await query("UPDATE votes SET score = $1 WHERE id = $2", [
+          score,
+          voteRes.rows[0].id,
+        ]);
+        ctx.reply(`🔄 Обновлена оценка фильма "${voteData.movieTitle}" на ${score}.`);
+      } else {
+        await query(
+          "INSERT INTO votes (user_id, movie_id, pack_id, score) VALUES ($1, $2, $3, $4)",
+          [userDbId, voteData.movieId, voteData.packId, score],
+        );
+        ctx.reply(`✅ Оценка ${score} для фильма "${voteData.movieTitle}" сохранена.`);
+      }
     }
 
-    userVoteState.delete(userId); // очищаем после голосования
+    userVoteState.delete(userId); // очищаем после обработки
   } catch (e) {
     console.error(e);
-    ctx.reply("❌ Ошибка при сохранении оценки.");
+    ctx.reply("❌ Ошибка при обработке оценки.");
   }
 });
 
