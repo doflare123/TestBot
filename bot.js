@@ -134,7 +134,7 @@ bot.action(/^calculate_pack_(\d+)$/, async (ctx) => {
       JOIN movies m ON v.movie_id = m.id
       WHERE v.pack_id = $1
     `,
-      [packId],
+      [packId]
     );
 
     if (!votesRes.rowCount)
@@ -178,17 +178,36 @@ bot.action(/^calculate_pack_(\d+)$/, async (ctx) => {
       }
     }
 
-    const telegramIds = [...new Set(votesRes.rows.map((r) => r.telegram_id))];
-    for (const id of telegramIds) {
-      await ctx.telegram.sendMessage(id, resultMessage);
-      await ctx.telegram.sendMessage(id, contributionMessage);
+    // Получаем список всех групп из базы
+    const groupsRes = await query(`SELECT chat_id FROM bot_groups`);
+    if (!groupsRes.rowCount) return ctx.reply("❌ Нет зарегистрированных групп.");
+
+    for (const row of groupsRes.rows) {
+      const groupId = row.chat_id;
+      try {
+        await ctx.telegram.sendMessage(groupId, resultMessage);
+        await ctx.telegram.sendMessage(groupId, contributionMessage);
+      } catch (e) {
+        console.warn(`Не удалось отправить сообщение в группу ${groupId}:`, e.message);
+      }
     }
 
-    ctx.reply("✅ Результаты отправлены всем участникам.");
+    ctx.reply("✅ Результаты отправлены во все группы.");
   } catch (e) {
     console.error(e);
     ctx.reply("❌ Ошибка при расчёте результатов.");
   }
+});
+
+bot.command("registerGroup", async (ctx) => {
+  if (!ctx.chat || ctx.chat.type === "private")
+    return ctx.reply("❌ Эту команду нужно вызывать в группе.");
+
+  const chatId = ctx.chat.id;
+  // Добавить в БД, если нет
+  await query(`INSERT INTO bot_groups(chat_id) VALUES ($1) ON CONFLICT DO NOTHING`, [chatId]);
+
+  ctx.reply("✅ Группа успешно зарегистрирована для получения результатов.");
 });
 
 
