@@ -33,7 +33,6 @@ async function notifyRestart() {
 
   try {
     const res = await query("SELECT chat_id FROM bot_groups");
-    console.log(res)
     if (!res.rowCount) {
       console.log("Нет групп в базе для уведомления.");
       return;
