@@ -18,6 +18,39 @@ async function query(sql, params) {
   }
 }
 
+async function notifyRestart() {
+  const changelog = `
+🚀 *Бот перезапущен и снова в строю!*
+Версия: *v0.5*
+
+🛠 *Что нового:*
+• Добавлена команда */my_stats* — теперь каждый пользователь может посмотреть свои оценки за последнюю пачку фильмов.
+• Улучшено форматирование некоторых сообщений от бота.
+• Повышена стабильность при голосовании.
+
+  `.trim();
+
+  try {
+    const res = await query("SELECT chat_id FROM bot_groups");
+    if (!res.rowCount) {
+      console.log("Нет групп в базе для уведомления.");
+      return;
+    }
+
+    for (const { chat_id } of res.rows) {
+      try {
+        await bot.telegram.sendMessage(chat_id, changelog, { parse_mode: "Markdown" });
+        console.log(`Уведомление отправлено в чат ${chat_id}`);
+      } catch (err) {
+        console.error(`❌ Не удалось отправить в ${chat_id}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error("Ошибка при получении чатов из базы:", err.message);
+  }
+}
+
+
 const adminAddMovieState = new Map();
 
 async function isAdmin(telegram_id) {
@@ -48,11 +81,13 @@ bot.start(async (ctx) => {
 bot.telegram.setMyCommands([
   { command: "start", description: "Начать работу с ботом" },
   { command: "vote", description: "Посмотреть какие фильмы на этот вечер" },
+  { command: "my_stats", description: "Посмотреть все свои оценки на последней пачке" },
 ]);
 
 bot.telegram.setMyCommands(
   [
     { command: "vote", description: "Посмотреть какие фильмы на этот вечер" },
+    { command: "my_stats", description: "Посмотреть все свои оценки на последней пачке" },
     { command: "calculate", description: "Подвести итоги голосования" },
     { command: "addpack", description: "Добавить пачку" },
     { command: "delpack", description: "Удалить пачку" },
@@ -197,6 +232,92 @@ bot.action(/^calculate_pack_(\d+)$/, async (ctx) => {
     console.error(e);
     ctx.reply("❌ Ошибка при расчёте результатов.");
   }
+});
+
+bot.command("stat_vote", async (ctx) => {
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.reply("❌ Только админ может просматривать статистику.");
+
+  const packsRes = await query("SELECT id, name FROM movie_packs ORDER BY id DESC");
+  if (!packsRes.rowCount)
+    return ctx.reply("❌ Нет доступных пачек.");
+
+  const buttons = packsRes.rows.map(p =>
+    [Markup.button.callback(p.name, `stat_vote_pack_${p.id}`)]
+  );
+
+  await ctx.reply("📊 Выберите пачку:", Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^stat_vote_pack_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!(await isAdmin(ctx.from.id)))
+    return ctx.reply("❌ Только админ может это делать.");
+
+  const packId = ctx.match[1];
+  const res = await query(`
+    SELECT m.title, u.username, v.score
+    FROM votes v
+    JOIN movies m ON v.movie_id = m.id
+    JOIN users_filmsBot u ON v.user_id = u.id
+    WHERE v.pack_id = $1
+    ORDER BY m.title, u.username
+  `, [packId]);
+
+  if (!res.rowCount)
+    return ctx.reply("❌ В этой пачке ещё нет голосов.");
+
+  const grouped = {};
+  for (const { title, username, score } of res.rows) {
+    if (!grouped[title]) grouped[title] = [];
+    grouped[title].push(`${username}: ${score}`);
+  }
+
+  let msg = "📊 Статистика по оценкам:\n";
+  for (const [title, votes] of Object.entries(grouped)) {
+    msg += `\n🎬 *${title}*\n` + votes.map(v => ` • ${v}`).join("\n") + "\n";
+  }
+
+  ctx.replyWithMarkdown(msg);
+});
+
+bot.command("my_stats", async (ctx) => {
+  const telegramId = ctx.from.id;
+  const userRes = await query(
+    "SELECT id FROM users_filmsBot WHERE telegram_id = $1",
+    [telegramId]
+  );
+  if (!userRes.rowCount)
+    return ctx.reply("❌ Ты не зарегистрирован. Отправь /start.");
+
+  const userId = userRes.rows[0].id;
+
+  const packRes = await query(
+    "SELECT id, name FROM movie_packs ORDER BY id DESC LIMIT 1"
+  );
+  if (!packRes.rowCount)
+    return ctx.reply("❌ Ещё не создано ни одной пачки.");
+
+  const { id: packId, name: packName } = packRes.rows[0];
+
+  const votesRes = await query(
+    `SELECT m.title, v.score
+     FROM votes v
+     JOIN movies m ON v.movie_id = m.id
+     WHERE v.user_id = $1 AND v.pack_id = $2
+     ORDER BY m.title`,
+    [userId, packId]
+  );
+
+  if (!votesRes.rowCount)
+    return ctx.reply(`ℹ️ Ты ещё не голосовал в пачке "${packName}".`);
+
+  let msg = `📋 Твои оценки в последней пачке "${packName}":\n\n`;
+  for (const { title, score } of votesRes.rows) {
+    msg += `• ${title}: ${score}\n`;
+  }
+
+  ctx.reply(msg);
 });
 
 bot.command("registerGroup", async (ctx) => {
@@ -475,7 +596,7 @@ bot.action(/^vote_film_(\d+)$/, async (ctx) => {
   // Запоминаем, что пользователь выбрал этот фильм
   userVoteState.set(userId, { movieId, movieTitle: title, packId: pack_id });
 
-  ctx.reply(`Введите оценку фильму "${title}" от 0 до 10:`);
+  ctx.reply(`Введите оценку фильму "${title}" от 0 до 10, где 0 - отмена оценки (если она уже была дана):`);
 });
 
 bot.on("text", async (ctx) => {
@@ -690,5 +811,8 @@ bot.command("vote_set", async (ctx) => {
 // });
 
 
-bot.launch();
+bot.launch().then(() => {
+  console.log("Бот запущен 🚀");
+  notifyRestart();
+});
 console.log("Bot started");
