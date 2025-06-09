@@ -21,9 +21,9 @@ async function query(sql, params) {
 async function notifyRestart() {
   const changelog = `
   🚀 *Бот перезапущен и снова в строю!*
-    Версия все также 0.5
+    Версия 0.5.1
 
-    Я просто пофиксил всякое говно
+    Баланс подсчетов
     `.trim();
 
   try {
@@ -184,16 +184,18 @@ bot.action(/^calculate_pack_(\d+)$/, async (ctx) => {
 
     for (const [voter, ratings] of Object.entries(votes)) {
       const numVotes = Object.keys(ratings).length;
-      const divisor = Math.log2(numVotes + 1);
+
       contributions[voter] = {};
 
       for (const [movie, score] of Object.entries(ratings)) {
-        const weighted = score / divisor;
+        const factor = 1 - 0.1 * (numVotes - 1);
+        const weighted = score * factor > 0 ? score * factor : 0; // чтобы не было отрицательных значений
         if (!totals[movie]) totals[movie] = 0;
         totals[movie] += weighted;
         contributions[voter][movie] = weighted;
       }
     }
+
 
     const sortedTotals = Object.entries(totals).sort((a, b) => b[1] - a[1]);
 
